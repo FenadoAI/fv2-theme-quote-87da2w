@@ -101,31 +101,59 @@ def parse_quotes_from_response(content: str, theme: str) -> List[Quote]:
     blocks = content.split('\n\n')
 
     for block in blocks:
-        # Look for Quote: and Author: patterns
-        quote_match = re.search(r'Quote:\s*["\']?([^"\']+)["\']?', block, re.IGNORECASE)
+        # Look for Quote: and Author: patterns (more flexible)
+        quote_match = re.search(r'Quote:\s*["\']?([^"\']+?)["\']?(?=\s*\n|\s*Author:)', block, re.IGNORECASE | re.DOTALL)
         author_match = re.search(r'Author:\s*([^\n]+)', block, re.IGNORECASE)
 
         if quote_match and author_match:
             quote_text = quote_match.group(1).strip()
             author_name = author_match.group(1).strip()
 
-            quotes.append(Quote(
-                text=quote_text,
-                author=author_name,
-                theme=theme
-            ))
+            # Clean up any markdown formatting
+            quote_text = re.sub(r'\*\*', '', quote_text)
+            author_name = re.sub(r'\*\*', '', author_name)
 
-    # Fallback: if no quotes found with the format, try to extract any quoted text
+            if quote_text and author_name:  # Ensure we have actual content
+                quotes.append(Quote(
+                    text=quote_text,
+                    author=author_name,
+                    theme=theme
+                ))
+
+    # Enhanced fallback: extract quotes with better patterns
     if not quotes:
-        quote_pattern = r'"([^"]+)"'
-        quote_matches = re.findall(quote_pattern, content)
+        # Try to find quoted strings followed by attribution
+        quote_patterns = [
+            r'"([^"]{10,})"[^\n]*?[-–—]\s*([^\n]+)',  # "quote" - author
+            r'"([^"]{10,})"',  # Just quoted text
+            r'([^"\n]{20,})[^\n]*?[-–—]\s*([^\n]+)',  # unquoted text - author
+        ]
 
-        for i, quote_text in enumerate(quote_matches[:3]):  # Max 3 quotes
-            quotes.append(Quote(
-                text=quote_text.strip(),
-                author=f"Anonymous {i + 1}",
-                theme=theme
-            ))
+        for pattern in quote_patterns:
+            matches = re.findall(pattern, content, re.MULTILINE)
+            for i, match in enumerate(matches[:3]):  # Max 3 quotes
+                if isinstance(match, tuple) and len(match) == 2:
+                    quote_text, author = match
+                else:
+                    quote_text = match if isinstance(match, str) else match[0]
+                    author = f"Anonymous {i + 1}"
+
+                quote_text = quote_text.strip()
+                author = author.strip()
+
+                # Clean up formatting
+                quote_text = re.sub(r'\*\*', '', quote_text)
+                author = re.sub(r'\*\*', '', author)
+
+                if len(quote_text) > 10:  # Ensure meaningful content
+                    quotes.append(Quote(
+                        text=quote_text,
+                        author=author,
+                        theme=theme
+                    ))
+
+            if quotes:  # If we found quotes, don't try other patterns
+                break
 
     return quotes
 
@@ -265,15 +293,17 @@ async def generate_quotes(request: QuoteRequest):
 
         # Generate quotes prompt
         prompt = f"""Generate {request.count} inspirational quote{'s' if request.count > 1 else ''} about "{request.theme}".
-        For each quote, provide:
-        1. The quote text (original and meaningful)
-        2. A fictional but believable author name
 
-        Format each quote as:
-        Quote: "[quote text]"
-        Author: [author name]
+Please format each quote EXACTLY as follows:
 
-        Make sure the quotes are inspiring, thoughtful, and directly related to the theme of "{request.theme}"."""
+Quote: "The quote text here"
+Author: Author Name
+
+Example:
+Quote: "Success is not final, failure is not fatal: it is the courage to continue that counts."
+Author: Winston Churchill
+
+Generate {request.count} quote{'s' if request.count > 1 else ''} about {request.theme}. Make sure each quote is meaningful, original, and inspiring."""
 
         # Execute agent
         result = await chat_agent.execute(prompt)
