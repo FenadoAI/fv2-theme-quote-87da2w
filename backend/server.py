@@ -12,6 +12,7 @@ from datetime import datetime
 
 # AI agents
 from ai_agents.agents import AgentConfig, SearchAgent, ChatAgent
+import re
 
 
 ROOT_DIR = Path(__file__).parent
@@ -72,6 +73,62 @@ class SearchResponse(BaseModel):
     search_results: Optional[dict] = None
     sources_count: int
     error: Optional[str] = None
+
+
+class QuoteRequest(BaseModel):
+    theme: str
+    count: int = 1
+
+
+class Quote(BaseModel):
+    text: str
+    author: str
+    theme: str
+
+
+class QuoteResponse(BaseModel):
+    success: bool
+    quotes: List[Quote]
+    theme: str
+    error: Optional[str] = None
+
+
+def parse_quotes_from_response(content: str, theme: str) -> List[Quote]:
+    """Parse quotes from AI response text"""
+    quotes = []
+
+    # Split by double newlines to get individual quote blocks
+    blocks = content.split('\n\n')
+
+    for block in blocks:
+        # Look for Quote: and Author: patterns
+        quote_match = re.search(r'Quote:\s*["\']?([^"\']+)["\']?', block, re.IGNORECASE)
+        author_match = re.search(r'Author:\s*([^\n]+)', block, re.IGNORECASE)
+
+        if quote_match and author_match:
+            quote_text = quote_match.group(1).strip()
+            author_name = author_match.group(1).strip()
+
+            quotes.append(Quote(
+                text=quote_text,
+                author=author_name,
+                theme=theme
+            ))
+
+    # Fallback: if no quotes found with the format, try to extract any quoted text
+    if not quotes:
+        quote_pattern = r'"([^"]+)"'
+        quote_matches = re.findall(quote_pattern, content)
+
+        for i, quote_text in enumerate(quote_matches[:3]):  # Max 3 quotes
+            quotes.append(Quote(
+                text=quote_text.strip(),
+                author=f"Anonymous {i + 1}",
+                theme=theme
+            ))
+
+    return quotes
+
 
 # Routes
 @api_router.get("/")
@@ -194,6 +251,58 @@ async def get_agent_capabilities():
             "success": False,
             "error": str(e)
         }
+
+
+@api_router.post("/quotes/generate", response_model=QuoteResponse)
+async def generate_quotes(request: QuoteRequest):
+    # Generate quotes based on theme using AI agent
+    global chat_agent
+
+    try:
+        # Init chat agent if needed
+        if chat_agent is None:
+            chat_agent = ChatAgent(agent_config)
+
+        # Generate quotes prompt
+        prompt = f"""Generate {request.count} inspirational quote{'s' if request.count > 1 else ''} about "{request.theme}".
+        For each quote, provide:
+        1. The quote text (original and meaningful)
+        2. A fictional but believable author name
+
+        Format each quote as:
+        Quote: "[quote text]"
+        Author: [author name]
+
+        Make sure the quotes are inspiring, thoughtful, and directly related to the theme of "{request.theme}"."""
+
+        # Execute agent
+        result = await chat_agent.execute(prompt)
+
+        if result.success:
+            # Parse the response to extract quotes
+            quotes = parse_quotes_from_response(result.content, request.theme)
+
+            return QuoteResponse(
+                success=True,
+                quotes=quotes,
+                theme=request.theme
+            )
+        else:
+            return QuoteResponse(
+                success=False,
+                quotes=[],
+                theme=request.theme,
+                error=result.error
+            )
+
+    except Exception as e:
+        logger.error(f"Error in quote generation endpoint: {e}")
+        return QuoteResponse(
+            success=False,
+            quotes=[],
+            theme=request.theme,
+            error=str(e)
+        )
 
 # Include router
 app.include_router(api_router)
